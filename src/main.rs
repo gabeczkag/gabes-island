@@ -8,9 +8,10 @@
 
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::io::Read;
+use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::raw::{c_int, c_uchar, c_ulong, c_void};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -694,6 +695,11 @@ struct Layout {
     wbpm: u64,
     wanti: i32,
     wdrift: u64,
+    asr: i32,
+    warmup: u64,
+    asr_python: String,
+    asr_script: String,
+    asr_model: String,
 }
 
 impl Default for Layout {
@@ -729,6 +735,11 @@ impl Default for Layout {
             wbpm: 0,
             wanti: 1,
             wdrift: 120,
+            asr: 1,
+            warmup: 10_000,
+            asr_python: "~/.local/share/gabes-island/venv/bin/python".into(),
+            asr_script: "~/.local/share/gabes-island/asr_vosk.py".into(),
+            asr_model: "~/.local/share/gabes-island/vosk-model-small-en-us-0.15".into(),
         }
     }
 }
@@ -819,6 +830,11 @@ fn load_layout() -> Layout {
                     "widget_bpm" => l.wbpm = v.parse().unwrap_or(l.wbpm),
                     "widget_antidesync" => l.wanti = v.parse().unwrap_or(l.wanti),
                     "widget_max_drift_ms" => l.wdrift = v.parse().unwrap_or(l.wdrift),
+                    "asr_enabled" => l.asr = v.parse().unwrap_or(l.asr),
+                    "widget_warmup_ms" => l.warmup = v.parse().unwrap_or(l.warmup),
+                    "asr_python" => l.asr_python = v.to_string(),
+                    "asr_script" => l.asr_script = v.to_string(),
+                    "asr_model" => l.asr_model = v.to_string(),
                     _ => {}
                 }
             }
@@ -1068,6 +1084,121 @@ fn draw_fall_text(
     let _ = cr.restore();
 }
 
+fn expand_home(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{home}/{rest}");
+        }
+    }
+    path.to_string()
+}
+
+fn mmss(ms: i64) -> String {
+    let s = (ms.max(0) / 1000) as i64;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+fn parse_mmss(s: &str) -> Option<i64> {
+    let (m, sec) = s.split_once(':')?;
+    let m: i64 = m.parse().ok()?;
+    let sec: i64 = sec.parse().ok()?;
+    Some((m * 60 + sec) * 1000)
+}
+
+fn norm_word(w: &str) -> String {
+    w.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+fn similar(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    if a.len() >= 4 && b.len() >= 4 && (a.starts_with(b) || b.starts_with(a)) {
+        return true;
+    }
+    a.len().max(b.len()) >= 3 && levenshtein(a, b) <= 1
+}
+
+fn spawn_asr(
+    python: &str,
+    script: &str,
+    model: &str,
+    tx: mpsc::Sender<String>,
+    slot: Arc<Mutex<Option<Child>>>,
+    active: Arc<AtomicBool>,
+) {
+    let python = expand_home(python);
+    let script = expand_home(script);
+    let model = expand_home(model);
+    if !std::path::Path::new(&python).is_file()
+        || !std::path::Path::new(&script).is_file()
+        || !std::path::Path::new(&model).is_dir()
+    {
+        eprintln!("gabes-island: ASR disabled (missing python/script/model)");
+        return;
+    }
+    thread::spawn(move || loop {
+        if !active.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(300));
+            continue;
+        }
+        let cmd = format!(
+            "parec --format=s16le --rate=16000 --channels=1 -d \"$(pactl get-default-sink).monitor\" --raw 2>/dev/null | exec '{}' '{}' '{}'",
+            python, script, model
+        );
+        let child = Command::new("sh")
+            .args(["-c", cmd.as_str()])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        let mut child = match child {
+            Ok(c) => c,
+            Err(_) => {
+                thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+        };
+        let stdout = child.stdout.take();
+        if let Ok(mut s) = slot.lock() {
+            *s = Some(child);
+        }
+        if let Some(out) = stdout {
+            for line in BufReader::new(out).lines().flatten() {
+                if !active.load(Ordering::Relaxed) {
+                    break;
+                }
+                let _ = tx.send(line);
+            }
+        }
+        if let Ok(mut s) = slot.lock() {
+            if let Some(mut c) = s.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+        thread::sleep(Duration::from_millis(400));
+    });
+}
+
 // ---------------------------------------------------------------- X11 app
 
 struct App {
@@ -1161,6 +1292,15 @@ struct App {
     last_pos_ms: i64,
     lyrics_raw: Vec<(i64, String)>,
     recognized: Vec<(i64, String)>,
+    asr_enabled: bool,
+    asr_tx: mpsc::Sender<String>,
+    asr_rx: mpsc::Receiver<String>,
+    asr_child: Arc<Mutex<Option<Child>>>,
+    asr_active: Arc<AtomicBool>,
+    aligned: Vec<Option<i64>>,
+    align_path: String,
+    warmup_ms: i64,
+    display_ready: bool,
     rng: u64,
     edit_sel: i32,
     x_offset: i32,
@@ -1214,6 +1354,10 @@ impl App {
         art_rx: mpsc::Receiver<(String, String)>,
         lyrics_tx: mpsc::Sender<(String, String)>,
         lyrics_rx: mpsc::Receiver<(String, String)>,
+        asr_tx: mpsc::Sender<String>,
+        asr_rx: mpsc::Receiver<String>,
+        asr_child: Arc<Mutex<Option<Child>>>,
+        asr_active: Arc<AtomicBool>,
     ) -> Option<App> {
         let dpy = xlib::XOpenDisplay(ptr::null());
         if dpy.is_null() {
@@ -1470,6 +1614,15 @@ impl App {
             last_pos_ms: 0,
             lyrics_raw: Vec::new(),
             recognized: Vec::new(),
+            asr_enabled: layout.asr != 0,
+            asr_tx: asr_tx.clone(),
+            asr_rx,
+            asr_child: asr_child.clone(),
+            asr_active: asr_active.clone(),
+            aligned: Vec::new(),
+            align_path: String::new(),
+            warmup_ms: layout.warmup as i64,
+            display_ready: layout.warmup == 0,
             rng: seed,
             edit_sel: -1,
             x_offset: layout.xoff,
@@ -1931,11 +2084,99 @@ impl App {
     }
 
     fn refresh_schedule(&mut self) {
-        self.lyrics_timed = self
-            .lyrics_raw
-            .iter()
-            .map(|(t, w)| (t + self.sync_offset_ms, w.clone()))
-            .collect();
+        let mut out = Vec::with_capacity(self.lyrics_raw.len());
+        let mut prev = 0i64;
+        for (i, (raw_t, word)) in self.lyrics_raw.iter().enumerate() {
+            let aligned = self.aligned.get(i).and_then(|v| *v);
+            let t = aligned.unwrap_or(*raw_t + self.sync_offset_ms);
+            let t = t.max(prev + 80);
+            prev = t;
+            out.push((t, word.clone()));
+        }
+        self.lyrics_timed = out;
+    }
+
+    fn load_alignment(&mut self, key: &str) {
+        self.aligned = vec![None; self.lyrics_raw.len()];
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in key.bytes() {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+        self.align_path = cache_dir()
+            .map(|d| d.join(format!("align-{hash:016x}.txt")).to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if let Ok(text) = fs::read_to_string(&self.align_path) {
+            for line in text.lines() {
+                let mut parts = line.splitn(3, '\t');
+                let (Some(idx), Some(mmss_v), Some(_word)) =
+                    (parts.next(), parts.next(), parts.next())
+                else {
+                    continue;
+                };
+                let Ok(i) = idx.parse::<usize>() else { continue };
+                let Some(ms) = parse_mmss(mmss_v) else { continue };
+                if i < self.aligned.len() {
+                    self.aligned[i] = Some(ms);
+                }
+            }
+        }
+        self.refresh_schedule();
+    }
+
+    fn save_alignment(&self, index: usize) {
+        if self.align_path.is_empty() || index >= self.lyrics_raw.len() {
+            return;
+        }
+        if let Some(dir) = std::path::Path::new(&self.align_path).parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        if let Some(t) = self.aligned.get(index).and_then(|v| *v) {
+            let word = &self.lyrics_raw[index].1;
+            let line = format!("{index}\t{}\t{word}\n", mmss(t));
+            let _ = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.align_path)
+                .and_then(|mut f| f.write_all(line.as_bytes()));
+        }
+    }
+
+    fn handle_asr_word(&mut self, word: &str) {
+        if self.lyrics_timed.is_empty() {
+            return;
+        }
+        let spoken = norm_word(word);
+        if spoken.len() < 2 {
+            return;
+        }
+        let start = self.schedule_cursor.saturating_sub(16);
+        let end = (self.schedule_cursor + 24).min(self.lyrics_timed.len());
+        let mut found = None;
+        for j in start..end {
+            let expected = norm_word(&self.lyrics_timed[j].1);
+            if similar(&spoken, &expected) {
+                found = Some(j);
+                break;
+            }
+        }
+        if let Some(j) = found {
+            let pos = (self.current_pos_ms() - 500).max(0);
+            let expected_at = self.lyrics_timed[j].0;
+            self.schedule_cursor = (j + 1).min(self.lyrics_timed.len());
+            if j < self.aligned.len() {
+                self.aligned[j] = Some(pos);
+                self.refresh_schedule();
+                self.save_alignment(j);
+            }
+            self.observe_drift(expected_at, pos);
+            let shown = self.lyrics_timed[j].1.clone();
+            if self.waterfall {
+                self.spawn_fall_word(shown, now_ms());
+            } else {
+                self.show_word(shown, now_ms(), 400);
+            }
+        }
     }
 
     fn observe_drift(&mut self, expected_ms: i64, pos_ms: i64) {
@@ -2047,6 +2288,16 @@ impl App {
             return;
         }
         if self.waterfall {
+            if self.widget_active {
+                unsafe { xlib::XUnmapWindow(self.dpy, self.widgetwin) };
+                self.widget_active = false;
+            }
+            return;
+        }
+        if !self.display_ready && self.current_pos_ms() >= self.warmup_ms {
+            self.display_ready = true;
+        }
+        if !self.display_ready {
             if self.widget_active {
                 unsafe { xlib::XUnmapWindow(self.dpy, self.widgetwin) };
                 self.widget_active = false;
@@ -2230,6 +2481,17 @@ impl App {
         if !self.waterfall {
             return;
         }
+        if !self.display_ready && self.current_pos_ms() >= self.warmup_ms {
+            self.display_ready = true;
+        }
+        if !self.display_ready {
+            if self.fall_mapped {
+                unsafe { xlib::XUnmapWindow(self.dpy, self.fallwin) };
+                self.fall_mapped = false;
+            }
+            self.fall_words.clear();
+            return;
+        }
         let ready = self.media.playing == 1
             && if self.widget_source == 1 {
                 !self.lyrics_words.is_empty()
@@ -2337,7 +2599,7 @@ impl App {
             let _ = std::fs::create_dir_all(dir);
         }
         let data = format!(
-            "# Gabes Island layout\ntop={}\nheight={}\nx_offset={}\nextra_width={}\nart_w={}\nart_h={}\ntext_h={}\ntime_w={}\ntime_h={}\nspec_w={}\nspec_h={}\nbtn_w={}\nbtn_h={}\nbtn_gap={}\nanim_secs={}\npad_x={}\nwidgets={}\nwidget_min={}\nwidget_max={}\nwidget_source={}\nwidget_place={}\nwidget_3d={}\nwidget_continuous={}\nwidget_word_ms={}\nwidget_sync={}\nwidget_waterfall={}\nwidget_trails={}\nwidget_bpm={}\nwidget_antidesync={}\nwidget_max_drift_ms={}\n",
+            "# Gabes Island layout\ntop={}\nheight={}\nx_offset={}\nextra_width={}\nart_w={}\nart_h={}\ntext_h={}\ntime_w={}\ntime_h={}\nspec_w={}\nspec_h={}\nbtn_w={}\nbtn_h={}\nbtn_gap={}\nanim_secs={}\npad_x={}\nwidgets={}\nwidget_min={}\nwidget_max={}\nwidget_source={}\nwidget_place={}\nwidget_3d={}\nwidget_continuous={}\nwidget_word_ms={}\nwidget_sync={}\nwidget_waterfall={}\nwidget_trails={}\nwidget_bpm={}\nwidget_antidesync={}\nwidget_max_drift_ms={}\nasr_enabled={}\nasr_python={}\nasr_script={}\nasr_model={}\nwidget_warmup_ms={}\n",
             self.topmargin,
             self.pillh,
             self.x_offset,
@@ -2371,7 +2633,12 @@ impl App {
             if self.trails { 1 } else { 0 },
             self.widget_bpm,
             if self.antidesync { 1 } else { 0 },
-            self.max_drift_ms
+            self.max_drift_ms,
+            if self.asr_enabled { 1 } else { 0 },
+            "~/.local/share/gabes-island/venv/bin/python",
+            "~/.local/share/gabes-island/asr_vosk.py",
+            "~/.local/share/gabes-island/vosk-model-small-en-us-0.15",
+            self.warmup_ms
         );
         let _ = std::fs::write(path, data);
     }
@@ -3258,20 +3525,38 @@ fn main() {
     let audio_active = Arc::new(AtomicBool::new(false));
     let (art_tx, art_rx) = mpsc::channel::<(String, String)>();
     let (lyrics_tx, lyrics_rx) = mpsc::channel::<(String, String)>();
+    let (asr_tx, asr_rx) = mpsc::channel::<String>();
+    let asr_child = Arc::new(Mutex::new(None));
+    let asr_active = Arc::new(AtomicBool::new(false));
     let mut app = match unsafe {
         App::new(
-            layout,
+            layout.clone(),
             spawn_audio(audio_active.clone()),
             audio_active.clone(),
             art_tx,
             art_rx,
             lyrics_tx,
             lyrics_rx,
+            asr_tx.clone(),
+            asr_rx,
+            asr_child.clone(),
+            asr_active.clone(),
         )
     } {
         Some(a) => a,
         None => std::process::exit(1),
     };
+
+    if layout.asr != 0 {
+        spawn_asr(
+            &layout.asr_python,
+            &layout.asr_script,
+            &layout.asr_model,
+            asr_tx,
+            asr_child.clone(),
+            asr_active,
+        );
+    }
 
     app.draw_edit();
     app.ensure_on_top();
@@ -3617,6 +3902,7 @@ fn main() {
                     app.lyrics_synced = true;
                 }
                 app.lyrics_raw = app.lyrics_timed.clone();
+                app.load_alignment(&key);
                 app.sync_offset_ms = 0;
                 app.drift_ema = 0.0;
                 app.drift_n = 0;
@@ -3691,6 +3977,9 @@ fn main() {
                             app.fall_words.clear();
                             app.fall_next = 0;
                             app.schedule_cursor = 0;
+                            app.aligned.clear();
+                            app.align_path.clear();
+                            app.display_ready = app.warmup_ms == 0;
                             let tx = app.lyrics_tx.clone();
                             let artist = app.media.artist.clone();
                             let title = app.media.title.clone();
@@ -3711,6 +4000,41 @@ fn main() {
         }
         app.update_widget(t);
         app.update_fall(t);
+
+        app.asr_active
+            .store(app.asr_enabled && app.media.playing == 1, Ordering::Relaxed);
+        if app.media.playing != 1 {
+            if let Ok(mut slot) = app.asr_child.lock() {
+                if let Some(mut child) = slot.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        while let Ok(line) = app.asr_rx.try_recv() {
+            if let Some((_at, word)) = line.split_once('\t') {
+                let word = word.trim();
+                if word.is_empty() {
+                    continue;
+                }
+                let pos = app.current_pos_ms();
+                app.recognized.push((pos, word.to_string()));
+                if let Some(dir) = cache_dir() {
+                    let _ = fs::create_dir_all(&dir);
+                    let _ = fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(dir.join("recognized.txt"))
+                        .and_then(|mut f| {
+                            f.write_all(format!("{}\t{}\n", mmss(pos), word).as_bytes())
+                        });
+                }
+                if app.recognized.len() > 512 {
+                    app.recognized.remove(0);
+                }
+                app.handle_asr_word(word);
+            }
+        }
         // keep above other windows without needless restacking
         if app.mapped && t.saturating_sub(last_raise) >= 800 {
             app.ensure_on_top();

@@ -92,6 +92,41 @@ using the Spotify/MPRIS metadata; plain lyrics fall back to sequential words.
   Ctrl+wheel = animation seconds.
 - Drag empty space to move the bar; middle click / sliders button to save.
 
+## Live ASR alignment (optional)
+
+At the start of a track the island starts a Vosk recognizer (English small
+model, 1-second buffers). It does **not** pre-process the whole song: the
+music plays normally, the recognizer listens in a separate process, and the
+spoken words are compared with the word being displayed.
+
+- The display starts after the first ~10 seconds (`widget_warmup_ms=10000`).
+- Matched words resync the in-memory timeline; if the cursor is behind it may
+  release a few words in one burst — by design.
+- Directions are stored as **minutes:seconds**, e.g.:
+
+  ```
+  ~/.cache/gabes-island/recognized.txt
+  2:56    i
+  2:56    like
+  3:00    right
+  ~/.cache/gabes-island/align-<hash>.txt
+  286     3:00    might
+  ```
+
+- Alignments are loaded on replay, so a previously listened track starts
+  already in sync.
+- Disable with `asr_enabled=0` if you want the lowest CPU/RAM. Without ASR
+  the LRC timeline and the wheel-based offset still work.
+
+ASR cost on this machine: **~12% CPU** and **~195 MB RSS** for the Vosk
+process (plus the island). It only runs while music is playing.
+
+## Fonts
+
+Latin text uses Noto Sans / DejaVu Sans. Text containing Japanese, Chinese
+or Korean characters automatically switches to **Noto Sans CJK JP/KR**, so
+titles and lyric words no longer render as tofu boxes.
+
 ## Measured usage (this machine)
 
 6-core laptop, 7.1 GB RAM, Linux Mint 22.3, X11, Cinnamon.
