@@ -23,6 +23,17 @@ a terminal-quality static-render cache.
 - Static render cache: only spectrum/time/progress regions are redrawn
 - Everything persisted in `~/.config/gabes/island.conf`
 
+## Platforms
+
+- **Linux / X11**: supported (Cinnamon, MATE, Xfce, i3, …). Tested on Linux
+  Mint 22.3 with Cinnamon/Muffin.
+- **Windows**: not supported. The overlay is built on X11, XShape, MPRIS/D-Bus
+  and `/proc`; a Windows build would need a winit/SMTC backend.
+- **macOS**: not supported for the same reason (no MPRIS, no `/proc`, no
+  X11 by default). A native port would need a different overlay backend.
+
+Linux release binaries are attached to GitHub Releases.
+
 ## Build
 
 ```sh

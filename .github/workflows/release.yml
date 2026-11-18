@@ -1,0 +1,36 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: Linux x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev libx11-dev libxext-dev \
+            libfreetype-dev libfontconfig1-dev
+      - name: Build
+        run: cargo build --release
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/gabes-island dist/
+          cp README.md LICENSE asr_vosk.py dist/
+          tar -C dist -czf "gabes-island-${GITHUB_REF_NAME}-linux-x86_64.tar.gz" .
+          sha256sum "gabes-island-${GITHUB_REF_NAME}-linux-x86_64.tar.gz" \
+            > "gabes-island-${GITHUB_REF_NAME}-linux-x86_64.tar.gz.sha256"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            gabes-island-*-linux-x86_64.tar.gz
+            gabes-island-*-linux-x86_64.tar.gz.sha256
