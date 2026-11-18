@@ -1,0 +1,18 @@
+[package]
+name = "gabes-island"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+x11 = { version = "2", features = ["xlib"] }
+cairo-rs = { version = "0.20", features = ["xlib"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+libc = "0.2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
