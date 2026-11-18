@@ -92,7 +92,26 @@ using the Spotify/MPRIS metadata; plain lyrics fall back to sequential words.
   Ctrl+wheel = animation seconds.
 - Drag empty space to move the bar; middle click / sliders button to save.
 
-## Live ASR alignment (optional)
+## Synchronization
+
+- Synced lyrics come from LRCLIB; word-level `<mm:ss.xx>` tags are used when
+  present, otherwise each line's words are distributed by length (weighted),
+  which tracks singing pace better than equal slots.
+- Player position is polled every 500 ms while playing and interpolated with
+  a monotonic clock between polls.
+- Wake-ups are adaptive: 6 ms around a scheduled word, 40 ms otherwise, so
+  releases land precisely without busy-looping.
+- **Audio-output latency compensation:** `widget_latency_ms=-1` detects a
+  Bluetooth sink and applies 200 ms (plain analog/digital outputs use 0).
+  Words are released by the delayed clock, so they match what you hear.
+  Set an explicit value to fine-tune.
+- The in-memory timeline cursor releases every word exactly once; seeking
+  rewinds or catches up without drift. `widget_bpm` can replace LRC timing
+  with a beat grid (`30000/BPM` ms per word).
+- No warm-up by default (`widget_warmup_ms=0`). With ASR enabled you can set
+  10000 to start after ten seconds of listening.
+
+## Live ASR alignment (optional, off by default)
 
 At the start of a track the island starts a Vosk recognizer (English small
 model, 1-second buffers). It does **not** pre-process the whole song: the
@@ -115,11 +134,11 @@ spoken words are compared with the word being displayed.
 
 - Alignments are loaded on replay, so a previously listened track starts
   already in sync.
-- Disable with `asr_enabled=0` if you want the lowest CPU/RAM. Without ASR
-  the LRC timeline and the wheel-based offset still work.
-
-ASR cost on this machine: **~12% CPU** and **~195 MB RSS** for the Vosk
-process (plus the island). It only runs while music is playing.
+- `asr_enabled=0` is the default (lowest CPU/RAM). The LRC timeline,
+  weighted word timing, latency compensation and the in-memory cursor all
+  work without it.
+- To enable it, set `asr_enabled=1` and point `asr_model` at a Vosk model.
+  ASR cost here: **~12% CPU** and **~195 MB RSS**, only while playing.
 
 ## Fonts
 
@@ -135,7 +154,9 @@ titles and lyric words no longer render as tofu boxes.
 | --- | --- | --- | --- | --- | --- |
 | idle (paused) | 0.0% | 11.6 MB | 4.6 MB | — | — |
 | playing + waterfall (before bar cache) | 6.6% | 15.9 MB | 8.7 MB | 21.0% | 11.6% |
-| playing + waterfall (static cache + slim fall area) | 3.8% | 14.9 MB | 7.5 MB | 8.8% | 10.4% |
+| playing + waterfall, ASR off (current) | 3.0% | 15.2 MB | — | 7.6% | — |
+| playing + waterfall + ASR | 6.8% | 15.4 MB | — | 8.8% | 10.4% |
+| Vosk ASR process (optional) | 11.7% | — | — | — | — |
 
 The bar keeps a cached static layer (pill, art, text, buttons) and per
 frame only redraws three small regions: spectrum, time and progress.

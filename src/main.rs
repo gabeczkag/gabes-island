@@ -697,6 +697,7 @@ struct Layout {
     wdrift: u64,
     asr: i32,
     warmup: u64,
+    latency: i64,
     asr_python: String,
     asr_script: String,
     asr_model: String,
@@ -735,8 +736,9 @@ impl Default for Layout {
             wbpm: 0,
             wanti: 1,
             wdrift: 120,
-            asr: 1,
-            warmup: 10_000,
+            asr: 0,
+            warmup: 0,
+            latency: -1,
             asr_python: "~/.local/share/gabes-island/venv/bin/python".into(),
             asr_script: "~/.local/share/gabes-island/asr_vosk.py".into(),
             asr_model: "~/.local/share/gabes-island/vosk-model-small-en-us-0.15".into(),
@@ -832,6 +834,7 @@ fn load_layout() -> Layout {
                     "widget_max_drift_ms" => l.wdrift = v.parse().unwrap_or(l.wdrift),
                     "asr_enabled" => l.asr = v.parse().unwrap_or(l.asr),
                     "widget_warmup_ms" => l.warmup = v.parse().unwrap_or(l.warmup),
+                    "widget_latency_ms" => l.latency = v.parse().unwrap_or(l.latency),
                     "asr_python" => l.asr_python = v.to_string(),
                     "asr_script" => l.asr_script = v.to_string(),
                     "asr_model" => l.asr_model = v.to_string(),
@@ -913,6 +916,29 @@ fn clean_word(w: &str) -> String {
         .to_string()
 }
 
+fn parse_word_tags(text: &str) -> Vec<(i64, String)> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(lt) = rest.find('<') {
+        let after = &rest[lt + 1..];
+        let Some(gt) = after.find('>') else { break };
+        let Some(t) = parse_lrc_time(&after[..gt]) else {
+            rest = &after[gt + 1..];
+            continue;
+        };
+        let content = &after[gt + 1..];
+        let next = content.find('<').unwrap_or(content.len());
+        for w in content[..next].split_whitespace() {
+            let w = clean_word(w);
+            if !w.is_empty() {
+                out.push((t, w));
+            }
+        }
+        rest = &content[next..];
+    }
+    out
+}
+
 /// Turns LRC into a flat list of (milliseconds, word), one entry per word.
 fn parse_lrc(text: &str) -> Vec<(i64, String)> {
     let mut lines: Vec<(i64, String)> = Vec::new();
@@ -949,10 +975,23 @@ fn parse_lrc(text: &str) -> Vec<(i64, String)> {
         if ws.is_empty() {
             continue;
         }
+        let tagged = parse_word_tags(text);
+        if !tagged.is_empty() {
+            words.extend(tagged);
+            continue;
+        }
         let dur = (next - start).max(200);
-        let slot = dur / ws.len() as i64;
+        // weights approximate how long each word is actually sung
+        let weights: Vec<f64> = ws
+            .iter()
+            .map(|w| (w.chars().count() as f64).max(1.0) + 1.5)
+            .collect();
+        let total: f64 = weights.iter().sum::<f64>().max(0.001);
+        let mut acc = 0.0;
         for (j, w) in ws.iter().enumerate() {
-            words.push((start + j as i64 * slot, w.clone()));
+            let at = start + (dur as f64 * acc / total) as i64;
+            words.push((at, w.clone()));
+            acc += weights[j];
         }
     }
     words
@@ -1301,6 +1340,7 @@ struct App {
     align_path: String,
     warmup_ms: i64,
     display_ready: bool,
+    latency_ms: i64,
     rng: u64,
     edit_sel: i32,
     x_offset: i32,
@@ -1623,6 +1663,17 @@ impl App {
             align_path: String::new(),
             warmup_ms: layout.warmup as i64,
             display_ready: layout.warmup == 0,
+            latency_ms: if layout.latency >= 0 {
+                layout.latency
+            } else {
+                let sink = Command::new("pactl")
+                    .arg("get-default-sink")
+                    .output()
+                    .ok()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+                if sink.starts_with("bluez") { 200 } else { 0 }
+            },
             rng: seed,
             edit_sel: -1,
             x_offset: layout.xoff,
@@ -2199,6 +2250,10 @@ impl App {
         }
     }
 
+    fn sync_pos_ms(&self) -> i64 {
+        (self.current_pos_ms() - self.latency_ms).max(0)
+    }
+
     fn current_pos_ms(&self) -> i64 {
         let mut pos = self.pos_base_us;
         if self.media.playing == 1 {
@@ -2234,7 +2289,7 @@ impl App {
                 self.draw_widget(phase);
             }
         }
-        let pos = self.current_pos_ms();
+        let pos = self.sync_pos_ms();
         if self.lyrics_timed.is_empty() || pos < self.lyrics_timed[0].0 {
             return;
         }
@@ -2534,14 +2589,10 @@ impl App {
             self.fall_mapped = true;
         }
         self.ensure_fall_buffer();
-        if t.saturating_sub(self.fall_last_draw) < 50 {
-            return;
-        }
-        self.fall_last_draw = t;
 
         // spawn new words
         if self.widget_sync && self.lyrics_synced && !self.lyrics_timed.is_empty() {
-            let pos = self.current_pos_ms();
+            let pos = self.sync_pos_ms();
             if pos >= self.lyrics_timed[0].0 {
                 let idx = match self
                     .lyrics_timed
@@ -2575,6 +2626,10 @@ impl App {
             }
         }
 
+        if t.saturating_sub(self.fall_last_draw) < 50 {
+            return;
+        }
+        self.fall_last_draw = t;
         let dt = if self.fall_last_tick == 0 {
             0.0
         } else {
@@ -2599,7 +2654,7 @@ impl App {
             let _ = std::fs::create_dir_all(dir);
         }
         let data = format!(
-            "# Gabes Island layout\ntop={}\nheight={}\nx_offset={}\nextra_width={}\nart_w={}\nart_h={}\ntext_h={}\ntime_w={}\ntime_h={}\nspec_w={}\nspec_h={}\nbtn_w={}\nbtn_h={}\nbtn_gap={}\nanim_secs={}\npad_x={}\nwidgets={}\nwidget_min={}\nwidget_max={}\nwidget_source={}\nwidget_place={}\nwidget_3d={}\nwidget_continuous={}\nwidget_word_ms={}\nwidget_sync={}\nwidget_waterfall={}\nwidget_trails={}\nwidget_bpm={}\nwidget_antidesync={}\nwidget_max_drift_ms={}\nasr_enabled={}\nasr_python={}\nasr_script={}\nasr_model={}\nwidget_warmup_ms={}\n",
+            "# Gabes Island layout\ntop={}\nheight={}\nx_offset={}\nextra_width={}\nart_w={}\nart_h={}\ntext_h={}\ntime_w={}\ntime_h={}\nspec_w={}\nspec_h={}\nbtn_w={}\nbtn_h={}\nbtn_gap={}\nanim_secs={}\npad_x={}\nwidgets={}\nwidget_min={}\nwidget_max={}\nwidget_source={}\nwidget_place={}\nwidget_3d={}\nwidget_continuous={}\nwidget_word_ms={}\nwidget_sync={}\nwidget_waterfall={}\nwidget_trails={}\nwidget_bpm={}\nwidget_antidesync={}\nwidget_max_drift_ms={}\nasr_enabled={}\nasr_python={}\nasr_script={}\nasr_model={}\nwidget_warmup_ms={}\nwidget_latency_ms={}\n",
             self.topmargin,
             self.pillh,
             self.x_offset,
@@ -2638,7 +2693,8 @@ impl App {
             "~/.local/share/gabes-island/venv/bin/python",
             "~/.local/share/gabes-island/asr_vosk.py",
             "~/.local/share/gabes-island/vosk-model-small-en-us-0.15",
-            self.warmup_ms
+            self.warmup_ms,
+            self.latency_ms
         );
         let _ = std::fs::write(path, data);
     }
@@ -3925,7 +3981,7 @@ fn main() {
 
         let t = now_ms();
 
-        if t.saturating_sub(last_poll) >= 1000 {
+        if t.saturating_sub(last_poll) >= if app.media.playing == 1 { 500 } else { 1000 } {
             if let Some(c) = &conn {
                 if let Some(fresh) = poll_media(c) {
                     let changed = fresh.title != app.media.title
@@ -4076,9 +4132,21 @@ fn main() {
             let mut rfds: libc::fd_set = std::mem::zeroed();
             libc::FD_ZERO(&mut rfds);
             libc::FD_SET(fd, &mut rfds);
+            let mut timeout_us = if app.media.playing == 1 { 40_000 } else { 60_000 };
+            if app.media.playing == 1
+                && app.lyrics_synced
+                && app.schedule_cursor < app.lyrics_timed.len()
+            {
+                let next = app.lyrics_timed[app.schedule_cursor].0 - app.sync_pos_ms();
+                if (0..80).contains(&next) {
+                    timeout_us = 6_000;
+                } else if (0..250).contains(&next) {
+                    timeout_us = 12_000;
+                }
+            }
             let mut tv = libc::timeval {
                 tv_sec: 0,
-                tv_usec: 30_000,
+                tv_usec: timeout_us,
             };
             libc::select(
                 fd + 1,
