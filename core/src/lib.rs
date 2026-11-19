@@ -14,6 +14,7 @@
 //! * [`spectrum`] — log band mapping and level smoothing
 //! * [`text`] — CJK script detection, time formatting, ellipsizing
 
+pub mod call;
 pub mod config;
 pub mod fall;
 pub mod geom;
@@ -24,6 +25,7 @@ pub mod spectrum;
 pub mod text;
 pub mod timing;
 
+pub use call::{Call, CallEvidence, CallKind, CallSession, CallState};
 pub use config::Layout;
 pub use media::{Media, PlayerAction};
 pub use rng::Rng;

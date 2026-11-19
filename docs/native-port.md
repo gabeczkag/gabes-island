@@ -133,6 +133,7 @@ Only the Linux column has been run on real hardware.
 | CJK font fallback | ✓ Noto CJK | ✓ Yu Gothic/Malgun/YaHei | ✓ Hiragino/PingFang/Apple SD Gothic |
 | `capture_apps` allowlist | ignored | ✓ (default Spotify) | ✓ (default Spotify) |
 | Hide over fullscreen apps | ✓ NetWM | ✓ | — |
+| Messenger call banner | ✓ detect + display (web) | — (not implemented) | — (not implemented) |
 | Live ASR alignment | ✓ optional | — (Linux-only) | — |
 | Single binary release | ✓ | ✓ | ✓ |
 
@@ -154,6 +155,9 @@ Only the Linux column has been run on real hardware.
 
 ## What is still missing
 
+0. **Messenger calls in the native port.** The Linux app detects web Messenger
+   calls (window titles + PulseAudio + camera) and shows an informational
+   banner; the native port has neither the detector nor the banner yet.
 0. **Hardware verification.** Nothing in the native port has run on Windows or
    macOS yet; until it does, the port stays "not tested, not recommended".
 

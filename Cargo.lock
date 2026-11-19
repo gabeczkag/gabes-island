@@ -861,6 +861,7 @@ version = "0.1.0"
 dependencies = [
  "cairo-rs",
  "image",
+ "island-core",
  "libc",
  "x11",
  "zbus",

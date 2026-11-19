@@ -68,6 +68,8 @@ pub struct Layout {
     pub asr_model: String,
     /// Comma separated allowlist of players. Empty = every player.
     pub capture_apps: String,
+    /// Messenger call banner (1 = on).
+    pub calls: i32,
 }
 
 impl Default for Layout {
@@ -110,6 +112,7 @@ impl Default for Layout {
             asr_script: "~/.local/share/gabes-island/asr_vosk.py".into(),
             asr_model: "~/.local/share/gabes-island/vosk-model-small-en-us-0.15".into(),
             capture_apps: "spotify".into(),
+            calls: 1,
         }
     }
 }
@@ -186,6 +189,7 @@ impl Layout {
                 "asr_script" => self.asr_script = v.to_string(),
                 "asr_model" => self.asr_model = v.to_string(),
                 "capture_apps" => self.capture_apps = v.to_string(),
+                "calls" => self.calls = v.parse().unwrap_or(self.calls),
                 _ => {}
             }
         }
@@ -200,7 +204,7 @@ impl Layout {
              widget_min={}\nwidget_max={}\nwidget_source={}\nwidget_place={}\n\
              widget_3d={}\nwidget_continuous={}\nwidget_word_ms={}\nwidget_sync={}\n\
              widget_waterfall={}\nwidget_trails={}\nwidget_bpm={}\nwidget_antidesync={}\n\
-             widget_max_drift_ms={}\nasr_enabled={}\nasr_python={}\nasr_script={}\n\
+             widget_max_drift_ms={}\ncalls={}\nasr_enabled={}\nasr_python={}\nasr_script={}\n\
              asr_model={}\nwidget_warmup_ms={}\nwidget_latency_ms={}\ncapture_apps={}\n",
             self.top,
             self.height,
@@ -232,6 +236,7 @@ impl Layout {
             self.wbpm,
             self.wanti,
             self.wdrift,
+            self.calls,
             self.asr,
             self.asr_python,
             self.asr_script,

@@ -21,6 +21,7 @@ a terminal-quality static-render cache.
 - Sync timeline kept in memory (LRC + optional beat grid, anti-drift cursor)
 - CJK-aware fonts (Noto Sans CJK JP/KR) — no more tofu boxes
 - Static render cache: only spectrum/time/progress regions are redrawn
+- Messenger call banner: who is calling, video/camera and call duration
 - Everything persisted in `~/.config/gabes/island.conf`
 
 > [!WARNING]
@@ -136,6 +137,7 @@ widget_trails=1
 widget_bpm=0
 widget_antidesync=1
 widget_max_drift_ms=120
+calls=1
 ```
 
 Words for `widget_source=words` live in `~/.config/gabes/words.txt`
@@ -165,6 +167,40 @@ stable app id (`com.spotify.client`, `Spotify.exe!Spotify`, …) and the display
 name. The default is **Spotify only**. Use `capture_apps=spotify,com.apple.Music`
 for more players, or `capture_apps=` (empty) to capture whatever plays.
 `asr_*` keys are accepted but unused on Windows/macOS (ASR is Linux-only).
+
+## Messenger calls (Linux)
+
+While a Messenger conversation is on a call, the island switches from the
+now-playing pill to a call banner: a coloured badge (amber while it rings,
+green for a voice call, blue for video), the conversation name, a subtitle
+with the camera state and the call duration.
+
+Detection is evidence-based, because Messenger exposes no call API to other
+applications:
+
+| Evidence | Source |
+| --- | --- |
+| a Messenger window is open | `_NET_WM_NAME`/`WM_NAME` of every managed X11 window |
+| the call is up, and its name | a browser capture stream in PulseAudio/PipeWire (`pactl list source-outputs`, e.g. `media.name = "Rozmowa grupowa"`) |
+| the camera is on | a Firefox/Chromium process holding `/dev/video*` |
+| it is ringing | titles such as `Połączenie przychodzące` / `Incoming call` |
+
+Audio and camera probes only run while a Messenger window exists (or a call is
+active), so an idle island does not spawn `pactl` in the background.
+
+**Limitation:** the web Messenger (and the browser in general) offers no way
+for another process to answer a call. The banner is therefore informational on
+Linux — it tells you who is calling and whether the camera is on; answering or
+declining still happens in Messenger. Backends for a desktop client that
+exposes automation can mark a call *controllable*, and the island then shows
+Accept/Decline buttons; no such backend ships today.
+
+```sh
+gabes-island --debug-calls        # one detection pass, printed, no windows
+gabes-island --preview-call out.png   # render the banner offscreen
+```
+
+Set `calls=0` in the config to disable detection completely.
 
 ## Edit mode
 

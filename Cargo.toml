@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+island-core = { path = "core" }
 x11 = { version = "2", features = ["xlib"] }
 cairo-rs = { version = "0.20", features = ["xlib"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
