@@ -39,6 +39,9 @@ extern "C" {
 use zbus::blocking::Connection;
 use zbus::zvariant::{OwnedValue, Value};
 
+mod calls;
+use island_core::call::{Call, CallKind, CallState};
+
 const MPRIS_IFACE: &str = "org.mpris.MediaPlayer2.Player";
 const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
 const PROPS_IFACE: &str = "org.freedesktop.DBus.Properties";
@@ -695,6 +698,7 @@ struct Layout {
     wbpm: u64,
     wanti: i32,
     wdrift: u64,
+    calls: i32,
     asr: i32,
     warmup: u64,
     latency: i64,
@@ -736,6 +740,7 @@ impl Default for Layout {
             wbpm: 0,
             wanti: 1,
             wdrift: 120,
+            calls: 1,
             asr: 0,
             warmup: 0,
             latency: -1,
@@ -832,6 +837,7 @@ fn load_layout() -> Layout {
                     "widget_bpm" => l.wbpm = v.parse().unwrap_or(l.wbpm),
                     "widget_antidesync" => l.wanti = v.parse().unwrap_or(l.wanti),
                     "widget_max_drift_ms" => l.wdrift = v.parse().unwrap_or(l.wdrift),
+                    "calls" => l.calls = v.parse().unwrap_or(l.calls),
                     "asr_enabled" => l.asr = v.parse().unwrap_or(l.asr),
                     "widget_warmup_ms" => l.warmup = v.parse().unwrap_or(l.warmup),
                     "widget_latency_ms" => l.latency = v.parse().unwrap_or(l.latency),
@@ -1357,6 +1363,10 @@ struct App {
     animating: bool,
     mapped: bool,
     media: Media,
+    /// Active Messenger call detected by `calls::Detector`; takes over the pill.
+    call: Option<Call>,
+    /// `calls=0` disables call detection entirely.
+    calls_on: bool,
     have_media: bool,
     targetw: i32,
     art: Option<ImageSurface>,
@@ -1690,6 +1700,8 @@ impl App {
             animating: false,
             mapped: false,
             media: Media::default(),
+            call: None,
+            calls_on: layout.calls != 0,
             have_media: false,
             targetw: PILL_MINW,
             art: None,
@@ -1736,6 +1748,10 @@ impl App {
         self.art_w.clamp(18.0, 96.0)
     }
 
+    fn calls_enabled(&self) -> bool {
+        self.calls_on
+    }
+
     fn min_pill_height(&self) -> i32 {
         let tallest = self
             .art_h
@@ -1747,6 +1763,11 @@ impl App {
     }
 
     fn display_title(&self) -> &str {
+        if let Some(c) = &self.call {
+            if !self.edit_mode {
+                return &c.peer;
+            }
+        }
         if !self.media.title.is_empty() {
             &self.media.title
         } else if self.edit_mode {
@@ -1756,7 +1777,17 @@ impl App {
         }
     }
 
+    /// Second line of the call banner ("Messenger · wideo · kamera wł.").
+    fn call_subtitle(&self, c: &Call) -> String {
+        call_subtitle(c)
+    }
+
     fn display_artist(&self) -> String {
+        if let Some(c) = &self.call {
+            if !self.edit_mode {
+                return self.call_subtitle(c);
+            }
+        }
         if self.edit_mode {
             match self.edit_sel {
                 0 => format!("anim {:.1}s • okładka • kółko = szer. • Alt = wys.", self.anim_secs),
@@ -2339,6 +2370,13 @@ impl App {
     }
 
     fn update_widget(&mut self, t: u128) {
+        if self.call.is_some() {
+            if self.widget_active {
+                unsafe { xlib::XUnmapWindow(self.dpy, self.widgetwin) };
+                self.widget_active = false;
+            }
+            return;
+        }
         if !self.widgets_enabled {
             return;
         }
@@ -2533,6 +2571,14 @@ impl App {
     }
 
     fn update_fall(&mut self, t: u128) {
+        if self.call.is_some() {
+            if self.fall_mapped {
+                unsafe { xlib::XUnmapWindow(self.dpy, self.fallwin) };
+                self.fall_mapped = false;
+            }
+            self.fall_words.clear();
+            return;
+        }
         if !self.waterfall {
             return;
         }
@@ -2706,52 +2752,70 @@ impl App {
                 let raw = cairo::ffi::cairo_xlib_surface_create(self.dpy, pm, self.vis, 8, 8);
                 if let Ok(surface) = Surface::from_raw_full(raw) {
                     if let Ok(cr) = Context::new(&surface) {
-                        // width comes from the track, not from the edit hint
-                        let title = if self.media.title.is_empty() {
-                            "Edytujesz wyspę"
+                        // width comes from the track or the call, never the hint
+                        let title = if let Some(c) = &self.call {
+                            c.peer.clone()
+                        } else if self.media.title.is_empty() {
+                            "Edytujesz wyspę".to_string()
                         } else {
-                            self.media.title.as_str()
+                            self.media.title.clone()
                         };
-                        let artist = if self.media.artist.is_empty() {
-                            "przeciągnij • kółko"
+                        let artist = if let Some(c) = &self.call {
+                            self.call_subtitle(c)
+                        } else if self.media.artist.is_empty() {
+                            "przeciągnij • kółko".to_string()
                         } else {
-                            self.media.artist.as_str()
+                            self.media.artist.clone()
                         };
                         let tscale = (self.text_h / 26.0).clamp(0.6, 2.0);
                         set_font_ex(
                             &cr,
-                            font_for_text(title, "Noto Sans"),
+                            font_for_text(&title, "Noto Sans"),
                             15.0 * tscale,
                             true,
                             false,
                         );
-                        let t = ellipsize(&cr, title, 460.0);
+                        let t = ellipsize(&cr, &title, 460.0);
                         let tw = text_width(&cr, &t);
                         set_font_ex(
                             &cr,
-                            font_for_text(artist, "Noto Sans"),
+                            font_for_text(&artist, "Noto Sans"),
                             12.0 * tscale,
                             false,
                             false,
                         );
-                        let a = ellipsize(&cr, artist, 460.0);
+                        let a = ellipsize(&cr, &artist, 460.0);
                         let aw = text_width(&cr, &a);
                         let textw = tw.max(aw);
-                        let btn_area = 4.0 * self.btn_w + 3.0 * self.btn_gap;
-                        let w = PAD
-                            + self.pad_x
-                            + self.art_size()
-                            + 10.0
-                            + textw
-                            + self.extra_width
-                            + 8.0
-                            + self.time_w
-                            + 8.0
-                            + self.spec_w
-                            + 10.0
-                            + btn_area
-                            + self.pad_x
-                            + PAD;
+                        let w = if self.call.is_some() {
+                            // call banner: badge, name, subtitle, duration
+                            PAD
+                                + self.pad_x
+                                + self.art_size()
+                                + 10.0
+                                + textw
+                                + self.extra_width
+                                + 8.0
+                                + self.time_w
+                                + self.pad_x
+                                + PAD
+                        } else {
+                            let btn_area = 4.0 * self.btn_w + 3.0 * self.btn_gap;
+                            PAD
+                                + self.pad_x
+                                + self.art_size()
+                                + 10.0
+                                + textw
+                                + self.extra_width
+                                + 8.0
+                                + self.time_w
+                                + 8.0
+                                + self.spec_w
+                                + 10.0
+                                + btn_area
+                                + self.pad_x
+                                + PAD
+                        };
                         (w as i32).clamp(PILL_MINW, PILL_MAXW)
                     } else {
                         PILL_MINW
@@ -2827,6 +2891,16 @@ impl App {
         self.media.title.hash(&mut h);
         self.media.artist.hash(&mut h);
         self.media.art.hash(&mut h);
+        if let Some(c) = &self.call {
+            c.peer.hash(&mut h);
+            (c.state as u8).hash(&mut h);
+            (c.kind as u8).hash(&mut h);
+            c.controllable.hash(&mut h);
+            // the duration is painted into the static layer once per second
+            ((now_ms().saturating_sub(c.started_ms)) / 1000).hash(&mut h);
+        } else {
+            0u64.hash(&mut h);
+        }
         self.loaded_icon.hash(&mut h);
         self.art.is_some().hash(&mut h);
         self.icon.is_some().hash(&mut h);
@@ -2862,6 +2936,10 @@ impl App {
     }
 
     fn draw_dynamic(&mut self, cr: &Context) {
+        if self.call.is_some() {
+            // the call banner is fully static (refreshed once per second)
+            return;
+        }
         let w = self.curw as f64;
         let h = self.curh as f64;
         let a = if self.anim > 0.0 { self.anim } else { 0.001 };
@@ -3068,6 +3146,12 @@ impl App {
         cr.set_line_width(1.0);
         cr.set_source_rgba(ac_r, ac_g, ac_b, 0.28 * a);
         let _ = cr.stroke();
+
+        if let Some(call) = self.call.clone() {
+            self.draw_call_content(cr, w, h, a, &call);
+            self.draw_edit_overlay(cr, w, h, a);
+            return;
+        }
 
         // album art
         let art_w = self.art_size();
@@ -3309,30 +3393,55 @@ impl App {
 
         }
 
-        if self.edit_mode {
-            let boxes = self.element_boxes(w, h);
-            for i in 0..5 {
-                let b = boxes[i];
-                let sel = self.edit_sel == i as i32;
-                let _ = cr.set_dash(if sel { &[] } else { &[3.0, 3.0] }, 0.0);
-                rounded_rect(cr, b.0, b.1, b.2, b.3, 4.0);
-                cr.set_line_width(if sel { 1.6 } else { 1.0 });
-                if sel {
-                    cr.set_source_rgba(ac_r, ac_g, ac_b, 0.10);
-                    let _ = cr.fill_preserve();
-                }
-                cr.set_source_rgba(ac_r, ac_g, ac_b, if sel { 0.95 } else { 0.45 });
-                let _ = cr.stroke();
-            }
-            let _ = cr.set_dash(&[], 0.0);
-            let main_sel = self.edit_sel == 5;
-            let _ = cr.set_dash(if main_sel { &[] } else { &[4.0, 4.0] }, 0.0);
-            rounded_rect(cr, 0.5, 0.5, w - 1.0, h - 1.0, (h - 1.0) / 2.0);
-            cr.set_line_width(if main_sel { 1.8 } else { 1.0 });
-            cr.set_source_rgba(ac_r, ac_g, ac_b, if main_sel { 0.95 } else { 0.5 } * a);
-            let _ = cr.stroke();
-            let _ = cr.set_dash(&[], 0.0);
+        self.draw_edit_overlay(cr, w, h, a);
+    }
+
+    /// Dashed element boxes shown while editing (media and call layouts share
+    /// them).
+    fn draw_edit_overlay(&self, cr: &Context, w: f64, h: f64, a: f64) {
+        if !self.edit_mode {
+            return;
         }
+        let (ac_r, ac_g, ac_b) = (
+            DEFAULT_ACCENT[0] as f64,
+            DEFAULT_ACCENT[1] as f64,
+            DEFAULT_ACCENT[2] as f64,
+        );
+        let boxes = self.element_boxes(w, h);
+        for i in 0..5 {
+            let b = boxes[i];
+            let sel = self.edit_sel == i as i32;
+            let _ = cr.set_dash(if sel { &[] } else { &[3.0, 3.0] }, 0.0);
+            rounded_rect(cr, b.0, b.1, b.2, b.3, 4.0);
+            cr.set_line_width(if sel { 1.6 } else { 1.0 });
+            if sel {
+                cr.set_source_rgba(ac_r, ac_g, ac_b, 0.10);
+                let _ = cr.fill_preserve();
+            }
+            cr.set_source_rgba(ac_r, ac_g, ac_b, if sel { 0.95 } else { 0.45 });
+            let _ = cr.stroke();
+        }
+        let _ = cr.set_dash(&[], 0.0);
+        let main_sel = self.edit_sel == 5;
+        let _ = cr.set_dash(if main_sel { &[] } else { &[4.0, 4.0] }, 0.0);
+        rounded_rect(cr, 0.5, 0.5, w - 1.0, h - 1.0, (h - 1.0) / 2.0);
+        cr.set_line_width(if main_sel { 1.8 } else { 1.0 });
+        cr.set_source_rgba(ac_r, ac_g, ac_b, if main_sel { 0.95 } else { 0.5 } * a);
+        let _ = cr.stroke();
+        let _ = cr.set_dash(&[], 0.0);
+    }
+
+    /// Messenger call banner: a coloured badge with a phone/camera glyph, the
+    /// conversation name, its subtitle and the call duration. No media chrome.
+    fn draw_call_content(&self, cr: &Context, w: f64, h: f64, a: f64, call: &Call) {
+        let metrics = CallMetrics {
+            art_w: self.art_size(),
+            pad_x: self.pad_x,
+            text_h: self.text_h,
+            time_w: self.time_w,
+            time_h: self.time_h,
+        };
+        draw_call_banner(cr, &metrics, w, h, a, call, now_ms());
     }
 
     fn show(&mut self) {
@@ -3541,16 +3650,272 @@ impl App {
 
 // ---------------------------------------------------------------- main
 
+
+/// Layout values the call banner needs (from the app or from a config).
+#[derive(Clone, Copy)]
+struct CallMetrics {
+    art_w: f64,
+    pad_x: f64,
+    text_h: f64,
+    time_w: f64,
+    time_h: f64,
+}
+
+impl CallMetrics {
+    fn from_layout(l: &Layout) -> CallMetrics {
+        CallMetrics {
+            art_w: l.art.clamp(18.0, 96.0),
+            pad_x: l.padx,
+            text_h: l.text_h,
+            time_w: l.time,
+            time_h: l.time_h,
+        }
+    }
+}
+
+fn call_subtitle(c: &Call) -> String {
+    if c.state == CallState::Incoming {
+        return match c.kind {
+            CallKind::Video => "Messenger · połączenie wideo".to_string(),
+            CallKind::Voice => "Messenger · połączenie przychodzące".to_string(),
+        };
+    }
+    match c.kind {
+        CallKind::Video => "Messenger · wideo · kamera wł.".to_string(),
+        CallKind::Voice => "Messenger · rozmowa głosowa".to_string(),
+    }
+}
+
+/// Draws the call banner content into an already-filled pill.
+///
+/// Kept free of `App` so the same routine renders the offscreen preview.
+fn draw_call_banner(
+    cr: &Context,
+    m: &CallMetrics,
+    w: f64,
+    h: f64,
+    a: f64,
+    call: &Call,
+    now: u128,
+) {
+    let (ac_r, ac_g, ac_b) = (
+        DEFAULT_ACCENT[0] as f64,
+        DEFAULT_ACCENT[1] as f64,
+        DEFAULT_ACCENT[2] as f64,
+    );
+    let art_w = m.art_w;
+    let r = art_w / 2.0;
+    let cx = PAD + m.pad_x + r;
+    let cy = h / 2.0;
+    let (br, bg, bb) = match (call.state, call.kind) {
+        (CallState::Incoming, _) => (1.0, 0.74, 0.30),
+        (CallState::Active, CallKind::Video) => (ac_r, ac_g, ac_b),
+        (CallState::Active, CallKind::Voice) => (0.35, 0.86, 0.56),
+    };
+
+    // badge
+    cr.arc(cx, cy, r, 0.0, 2.0 * std::f64::consts::PI);
+    cr.set_source_rgba(br, bg, bb, 0.20 * a);
+    let _ = cr.fill();
+    cr.set_line_width(1.0);
+    cr.arc(cx, cy, r - 0.5, 0.0, 2.0 * std::f64::consts::PI);
+    cr.set_source_rgba(br, bg, bb, 0.60 * a);
+    let _ = cr.stroke();
+
+    // glyph
+    let k = (art_w / 32.0).max(0.5);
+    let _ = cr.save();
+    cr.set_source_rgba(0.96, 0.97, 1.0, 0.95 * a);
+    match call.kind {
+        CallKind::Video => {
+            let bw = 15.0 * k;
+            let bh = 10.0 * k;
+            rounded_rect(cr, cx - bw / 2.0 - 1.5 * k, cy - bh / 2.0, bw, bh, 2.6 * k);
+            let _ = cr.fill();
+            cr.move_to(cx + bw / 2.0 - 1.5 * k, cy - 2.6 * k);
+            cr.line_to(cx + bw / 2.0 + 4.0 * k, cy - 5.0 * k);
+            cr.line_to(cx + bw / 2.0 + 4.0 * k, cy + 5.0 * k);
+            cr.line_to(cx + bw / 2.0 - 1.5 * k, cy + 2.6 * k);
+            cr.close_path();
+            let _ = cr.fill();
+        }
+        CallKind::Voice => {
+            cr.translate(cx, cy);
+            cr.rotate(-0.78);
+            rounded_rect(cr, -1.8 * k, -8.0 * k, 3.6 * k, 16.0 * k, 1.8 * k);
+            let _ = cr.fill();
+            cr.arc(0.0, -7.0 * k, 2.6 * k, 0.0, 2.0 * std::f64::consts::PI);
+            let _ = cr.fill();
+            cr.arc(0.0, 7.0 * k, 2.6 * k, 0.0, 2.0 * std::f64::consts::PI);
+            let _ = cr.fill();
+        }
+    }
+    let _ = cr.restore();
+
+    // conversation name + subtitle
+    let textx = PAD + m.pad_x + art_w + 10.0;
+    let ts = (m.text_h / 26.0).clamp(0.6, 2.0);
+    let th = m.text_h.clamp(16.0, 90.0);
+    let y0 = (h - th) / 2.0;
+    let time_x = w - PAD - m.pad_x - m.time_w;
+    let maxw = (time_x - 8.0 - textx - 4.0).max(10.0);
+    set_font_ex(
+        cr,
+        font_for_text(&call.peer, "Noto Sans"),
+        12.0 * ts,
+        true,
+        false,
+    );
+    let title = ellipsize(cr, &call.peer, maxw);
+    cr.set_source_rgba(0.90, 0.92, 0.97, a);
+    cr.move_to(textx, y0 + th * 0.42);
+    let _ = cr.show_text(&title);
+
+    let subtitle = call_subtitle(call);
+    set_font_ex(
+        cr,
+        font_for_text(&subtitle, "Noto Sans"),
+        10.0 * ts,
+        false,
+        false,
+    );
+    let sub = ellipsize(cr, &subtitle, maxw);
+    cr.set_source_rgba(0.56, 0.60, 0.70, a);
+    cr.move_to(textx, y0 + th * 0.92);
+    let _ = cr.show_text(&sub);
+
+    // duration on the right
+    let label = match call.state {
+        CallState::Incoming => "dzwoni".to_string(),
+        CallState::Active => mmss(call.duration_ms(now)),
+    };
+    set_font(cr, 9.0, false);
+    let tw = text_width(cr, &label);
+    let time_hh = m.time_h.clamp(10.0, 70.0);
+    cr.set_source_rgba(0.60, 0.64, 0.74, a);
+    cr.move_to(
+        time_x + m.time_w - tw,
+        (h - time_hh) / 2.0 + time_hh / 2.0 + 3.0,
+    );
+    let _ = cr.show_text(&label);
+}
+
+/// `--preview-call FILE`: renders the call banner offscreen (no windows).
+fn preview_call(path: &str) -> std::io::Result<()> {
+    let layout = load_layout();
+    let metrics = CallMetrics::from_layout(&layout);
+    let tallest = layout
+        .art_h
+        .max(layout.text_h)
+        .max(layout.time_h)
+        .max(layout.spec_h)
+        .max(layout.btn_h);
+    let min_h = ((tallest + 6.0) as i32).max(30);
+    let h = layout.height.max(min_h) as f64;
+    let w = 460.0;
+    let call = Call {
+        peer: "Rozmowa grupowa".to_string(),
+        state: CallState::Active,
+        kind: CallKind::Video,
+        controllable: false,
+        source: "messenger-web".to_string(),
+        started_ms: 0,
+    };
+    let mut surface = ImageSurface::create(Format::ARgb32, w as i32, h as i32)
+        .map_err(std::io::Error::other)?;
+    {
+        let cr = Context::new(&surface).map_err(std::io::Error::other)?;
+        cr.set_operator(Operator::Source);
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
+        let _ = cr.paint();
+        cr.set_operator(Operator::Over);
+        rounded_rect(&cr, 0.0, 0.0, w, h, h / 2.0);
+        cr.set_source_rgba(0.035, 0.04, 0.06, 0.88);
+        let _ = cr.fill_preserve();
+        cr.set_line_width(1.0);
+        cr.set_source_rgba(
+            DEFAULT_ACCENT[0] as f64,
+            DEFAULT_ACCENT[1] as f64,
+            DEFAULT_ACCENT[2] as f64,
+            0.28,
+        );
+        let _ = cr.stroke();
+        draw_call_banner(&cr, &metrics, w, h, 1.0, &call, 754_000);
+        let _ = surface.flush();
+    }
+    // cairo-rs has no PNG writer: copy the ARGB32 surface into straight RGBA
+    // and let the `image` crate encode it.
+    let (wpx, hpx) = (surface.width() as usize, surface.height() as usize);
+    let stride = surface.stride() as usize;
+    let data = surface.data().map_err(std::io::Error::other)?;
+    let mut rgba = vec![0u8; wpx * hpx * 4];
+    for y in 0..hpx {
+        for x in 0..wpx {
+            let i = y * stride + x * 4;
+            let (b, g, r, a) = (
+                data[i] as u32,
+                data[i + 1] as u32,
+                data[i + 2] as u32,
+                data[i + 3] as u32,
+            );
+            let o = (y * wpx + x) * 4;
+            if a == 0 {
+                continue;
+            }
+            rgba[o] = ((r * 255 + a / 2) / a).min(255) as u8;
+            rgba[o + 1] = ((g * 255 + a / 2) / a).min(255) as u8;
+            rgba[o + 2] = ((b * 255 + a / 2) / a).min(255) as u8;
+            rgba[o + 3] = a as u8;
+        }
+    }
+    image::save_buffer(
+        path,
+        &rgba,
+        wpx as u32,
+        hpx as u32,
+        image::ExtendedColorType::Rgba8,
+    )
+    .map_err(|e| std::io::Error::other(e.to_string()))
+}
+
 fn now_ms() -> u128 {
     use std::sync::OnceLock;
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_millis()
 }
 
+/// `--debug-calls`: one detection pass, printed, no windows created.
+fn debug_calls_report() {
+    unsafe {
+        let dpy = xlib::XOpenDisplay(ptr::null());
+        if dpy.is_null() {
+            eprintln!("gabes-island: cannot open display");
+            std::process::exit(1);
+        }
+        let root = xlib::XDefaultRootWindow(dpy);
+        let titles = calls::window_titles(dpy, root);
+        println!("windows: {}", titles.len());
+        for t in &titles {
+            println!("  window: {t:?}");
+        }
+        let mut detector = calls::Detector::new();
+        let now = now_ms();
+        let _ = detector.poll(now, dpy, root);
+        // the audio/camera worker needs one round
+        thread::sleep(Duration::from_millis(1_400));
+        let call = detector.poll(now_ms(), dpy, root);
+        println!("browser capture streams: {:?}", calls::pulse_capture_names());
+        println!("camera in use: {}", calls::browser_camera_in_use());
+        println!("detected call: {call:#?}");
+        xlib::XCloseDisplay(dpy);
+    }
+}
+
 fn main() {
     let mut layout = load_layout();
     let args: Vec<String> = std::env::args().collect();
     let mut start_edit = false;
+    let mut debug_calls = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -3574,8 +3939,25 @@ fn main() {
                 start_edit = true;
                 i += 1;
             }
+            "--debug-calls" => {
+                debug_calls = true;
+                i += 1;
+            }
+            "--preview-call" if i + 1 < args.len() => {
+                let path = args[i + 1].clone();
+                if let Err(e) = preview_call(&path) {
+                    eprintln!("gabes-island: cannot write {path}: {e}");
+                    std::process::exit(1);
+                }
+                println!("{path}");
+                return;
+            }
             _ => i += 1,
         }
+    }
+
+    if debug_calls {
+        return debug_calls_report();
     }
 
     let audio_active = Arc::new(AtomicBool::new(false));
@@ -3640,6 +4022,8 @@ fn main() {
     let mut last_tick = 0u128;
     let mut last_fs = 0u128;
     let mut last_raise = 0u128;
+    let mut call_detector = calls::Detector::new();
+    let mut last_call_poll = 0u128;
     let mut fullscreen = false;
     let fd = unsafe { xlib::XConnectionNumber(app.dpy) };
 
@@ -3981,6 +4365,17 @@ fn main() {
 
         let t = now_ms();
 
+        // Messenger calls (X11 titles here; audio/camera on a side worker).
+        if app.calls_enabled() && t.saturating_sub(last_call_poll) >= 1000 {
+            last_call_poll = t;
+            let call = call_detector.poll(t, app.dpy, app.root);
+            if call != app.call {
+                app.call = call;
+                app.static_key = 0;
+                app.targetw = app.measure_target();
+            }
+        }
+
         if t.saturating_sub(last_poll) >= if app.media.playing == 1 { 500 } else { 1000 } {
             if let Some(c) = &conn {
                 if let Some(fresh) = poll_media(c) {
@@ -4096,7 +4491,9 @@ fn main() {
             app.ensure_on_top();
             last_raise = t;
         }
-        let want_show = app.edit_mode || (app.have_media && !fullscreen && app.media.playing == 1);
+        let want_show = app.edit_mode
+            || app.call.is_some()
+            || (app.have_media && !fullscreen && app.media.playing == 1);
         if !want_show {
             app.bar_levels = [0.0; MAX_BARS];
             if let Ok(mut g) = app.bands.lock() {
@@ -4124,6 +4521,14 @@ fn main() {
             app.tick(dt);
             last_tick = t;
         } else if app.mapped && !app.animating && app.media.playing == 1 && t.saturating_sub(last_tick) >= 50 {
+            app.draw();
+            last_tick = t;
+        } else if app.mapped
+            && !app.animating
+            && app.call.is_some()
+            && t.saturating_sub(last_tick) >= 1000
+        {
+            // the call banner only changes once per second (duration)
             app.draw();
             last_tick = t;
         }

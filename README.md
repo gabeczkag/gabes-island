@@ -21,20 +21,35 @@ a terminal-quality static-render cache.
 - Sync timeline kept in memory (LRC + optional beat grid, anti-drift cursor)
 - CJK-aware fonts (Noto Sans CJK JP/KR) — no more tofu boxes
 - Static render cache: only spectrum/time/progress regions are redrawn
+- Messenger call banner: who is calling, video/camera and call duration
 - Everything persisted in `~/.config/gabes/island.conf`
+
+> [!WARNING]
+> **The Windows and macOS port is experimental: not tested, not recommended.**
+> It compiles on both targets and the shared logic has a real test suite, but
+> it has never been run on Windows or macOS hardware. Expect bugs, missing
+> polish and platform behaviour that differs from the Linux app. Do not use it
+> for daily listening yet; use the Linux/X11 build.
 
 ## Platforms
 
-- **Linux / X11**: supported (Cinnamon, MATE, Xfce, i3, …). Tested on Linux
-  Mint 22.3 with Cinnamon/Muffin.
-- **Windows**: not supported. The overlay is built on X11, XShape, MPRIS/D-Bus
-  and `/proc`; a Windows build would need a winit/SMTC backend.
-- **macOS**: not supported for the same reason (no MPRIS, no `/proc`, no
-  X11 by default). A native port would need a different overlay backend.
+- **Linux / X11**: the root crate (`gabes-island`), built on X11, XShape,
+  MPRIS/D-Bus and `/proc`. Tested on Linux Mint 22.3 with Cinnamon/Muffin.
+  This is the supported build.
+- **Windows 10/11**: experimental preview in `native/`
+  (`gabes-island-native`) — **not tested, not recommended**. Layered
+  always-on-top windows, SMTC now-playing and transport, WASAPI loopback
+  spectrum; compile-checked and built in CI, never run on real hardware.
+- **macOS 13+**: experimental preview in the same crate — **not tested, not
+  recommended**. Floating `NSWindow`, MediaRemote (with an AppleScript
+  fallback for Spotify/Music); the spectrum is a documented stub.
 
-Linux release binaries are attached to GitHub Releases.
+Linux binaries are attached to GitHub Releases. Native artifacts are
+published with an `experimental-untested` suffix so they are not mistaken for
+supported builds. See [docs/native-port.md](docs/native-port.md) for the
+architecture, the exact parity matrix and the remaining stubs.
 
-## Build
+## Build (Linux/X11)
 
 ```sh
 cargo build --release
@@ -42,6 +57,40 @@ cargo build --release
 
 System packages: `libcairo2-dev`, `libx11-dev`, `libxext-dev`,
 `libfreetype-dev`, `libfontconfig-dev`.
+
+## Build (Windows / macOS) — experimental, not tested, not recommended
+
+> These steps build the native port. It has not been verified on real
+> Windows or macOS machines; treat any result as a preview.
+
+The repository is a Cargo workspace: the root package is still the Linux app,
+so `cargo build --release` at the top level builds exactly what it always did.
+The port is a separate crate:
+
+```sh
+cargo build --release -p gabes-island-native
+```
+
+No system libraries are needed — the renderer is `tiny-skia` + `cosmic-text`
+and the Windows/macOS system APIs come through the `windows` and `objc2`
+crates. The only runtime expectation is a `curl` binary for lyrics and remote
+cover art (shipped with Windows 10 1803+ and with macOS).
+
+Run it:
+
+```sh
+./target/release/gabes-island-native            # real system media
+./target/release/gabes-island-native --mock     # fake Spotify session
+./target/release/gabes-island-native --edit     # start in edit mode
+./target/release/gabes-island-native --preview ./out    # PNGs, no window
+./target/release/gabes-island-native --bench 3          # headless benchmark
+./target/release/gabes-island-native --diagnose         # fonts + backends
+```
+
+The native binary is unsigned: on macOS, Gatekeeper may require
+`xattr -d com.apple.quarantine` or a right-click → Open on first launch; on
+Windows, SmartScreen shows "More info → Run anyway". Signing/notarisation is
+a TODO, not a code problem.
 
 ## Run
 
@@ -88,11 +137,70 @@ widget_trails=1
 widget_bpm=0
 widget_antidesync=1
 widget_max_drift_ms=120
+calls=1
 ```
 
 Words for `widget_source=words` live in `~/.config/gabes/words.txt`
 (one per line). With `widget_source=lyrics`, lyrics are cached from LRCLIB
 using the Spotify/MPRIS metadata; plain lyrics fall back to sequential words.
+
+### Native port config
+
+The native build reads the same keys from a platform path:
+
+| Platform | Config |
+| --- | --- |
+| Linux | `~/.config/gabes/island.conf` (root crate) |
+| Windows | `%APPDATA%\gabes\island.conf` |
+| macOS | `~/Library/Application Support/gabes/island.conf` |
+
+`GABES_CONFIG_DIR` overrides the directory on every platform.
+
+One extra key exists for the native build:
+
+```ini
+capture_apps=spotify
+```
+
+A comma-separated, case-insensitive allowlist of players matched against the
+stable app id (`com.spotify.client`, `Spotify.exe!Spotify`, …) and the display
+name. The default is **Spotify only**. Use `capture_apps=spotify,com.apple.Music`
+for more players, or `capture_apps=` (empty) to capture whatever plays.
+`asr_*` keys are accepted but unused on Windows/macOS (ASR is Linux-only).
+
+## Messenger calls (Linux)
+
+While a Messenger conversation is on a call, the island switches from the
+now-playing pill to a call banner: a coloured badge (amber while it rings,
+green for a voice call, blue for video), the conversation name, a subtitle
+with the camera state and the call duration.
+
+Detection is evidence-based, because Messenger exposes no call API to other
+applications:
+
+| Evidence | Source |
+| --- | --- |
+| a Messenger window is open | `_NET_WM_NAME`/`WM_NAME` of every managed X11 window |
+| the call is up, and its name | a browser capture stream in PulseAudio/PipeWire (`pactl list source-outputs`, e.g. `media.name = "Rozmowa grupowa"`) |
+| the camera is on | a Firefox/Chromium process holding `/dev/video*` |
+| it is ringing | titles such as `Połączenie przychodzące` / `Incoming call` |
+
+Audio and camera probes only run while a Messenger window exists (or a call is
+active), so an idle island does not spawn `pactl` in the background.
+
+**Limitation:** the web Messenger (and the browser in general) offers no way
+for another process to answer a call. The banner is therefore informational on
+Linux — it tells you who is calling and whether the camera is on; answering or
+declining still happens in Messenger. Backends for a desktop client that
+exposes automation can mark a call *controllable*, and the island then shows
+Accept/Decline buttons; no such backend ships today.
+
+```sh
+gabes-island --debug-calls        # one detection pass, printed, no windows
+gabes-island --preview-call out.png   # render the banner offscreen
+```
+
+Set `calls=0` in the config to disable detection completely.
 
 ## Edit mode
 
@@ -172,6 +280,25 @@ titles and lyric words no longer render as tofu boxes.
 The bar keeps a cached static layer (pill, art, text, buttons) and per
 frame only redraws three small regions: spectrum, time and progress.
 The waterfall renders into a 560×760 column instead of a fullscreen overlay.
+
+### Native port (Linux measurement, same machine)
+
+The native crate is measured with its Linux/X11 development presenter, which
+runs the identical state machine and renderer:
+
+| State | App CPU | App RSS |
+| --- | --- | --- |
+| release build, window shown, mock player, waterfall off | 1.0% | 10.5 MB |
+| headless `--bench 3`, pill only (render cost) | 0.27% of one core | — |
+| headless `--bench 3`, pill + falling lyrics (render cost) | 0.51% of one core | 7.1 MB |
+
+`--bench` reports work per simulated second at the app's own wake cadence
+(50 ms while playing), so "0.27% of one core" is the renderer's share; the
+windowed number also includes the event loop and the compositor. Release
+binary: 4.0 MB. The same trick as on Linux keeps it cheap: the pill's static
+layer is cached and only spectrum, time and progress are repainted, the
+waterfall is its own small window, and an idle overlay wakes four times per
+second instead of sixty.
 
 ## License
 

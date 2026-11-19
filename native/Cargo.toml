@@ -1,0 +1,58 @@
+[package]
+name = "gabes-island-native"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Native Windows/macOS overlay for gabes-island: now playing, spectrum, lyrics"
+repository = "https://github.com/gabeczkag/gabes-island"
+default-run = "gabes-island-native"
+
+[dependencies]
+island-core = { path = "../core" }
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd", "png-format"] }
+cosmic-text = { version = "0.19", default-features = false, features = ["std", "swash"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+libc = "0.2"
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+winit = "0.30"
+
+# Dev preview / X11 build of the same renderer. Never used on Windows/macOS.
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = "0.30"
+softbuffer = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+winit = "0.30"
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_System_LibraryLoader",
+] }
+windows = { version = "0.62", features = [
+  "Foundation",
+  "Foundation_Collections",
+  "Media_Control",
+  "Storage_Streams",
+  "Graphics_Imaging",
+  "Win32_Foundation",
+  "Win32_Media_Audio",
+  "Win32_Media_Audio_Endpoints",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Variant",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+winit = "0.30"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-quartz-core = "0.3"
+block2 = "0.6"
+core-foundation = "0.10"
+core-graphics = "0.24"
+foreign-types = "0.5"
