@@ -1,5 +1,15 @@
 # Native port: Windows and macOS
 
+> [!WARNING]
+> **Status: experimental — not tested, not recommended.**
+> Nothing in this crate has been run on Windows or macOS hardware. It
+> type-checks against the real `windows`/`objc2` APIs, builds in CI on both
+> platforms, and its shared logic and renderer are unit tested on Linux, but
+> presentation, media integration and input have never been exercised on the
+> target operating systems. Treat every `✓` below as *implemented and
+> compile-checked*, not as *verified working*. The Linux/X11 build remains the
+> supported app.
+
 The Linux/X11 app in the repository root is unchanged and still builds with
 `cargo build --release`. Windows and macOS are served by a new workspace
 member, `gabes-island-native`, that shares the interesting logic with the
@@ -104,6 +114,9 @@ Accessibility or Screen Recording permission.
 
 ## Parity matrix
 
+`✓` in the Windows/macOS columns means *implemented and compile-checked*.
+Only the Linux column has been run on real hardware.
+
 | Feature | Linux (root crate) | Windows (native) | macOS (native) |
 | --- | --- | --- | --- |
 | Now-playing pill, art, title, artist | ✓ | ✓ | ✓ |
@@ -140,6 +153,9 @@ Accessibility or Screen Recording permission.
   on every change (no linker required), and builds both natively.
 
 ## What is still missing
+
+0. **Hardware verification.** Nothing in the native port has run on Windows or
+   macOS yet; until it does, the port stays "not tested, not recommended".
 
 1. **macOS spectrum** — Core Audio process tap or ScreenCaptureKit audio,
    behind a permission prompt.

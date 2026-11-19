@@ -29,6 +29,9 @@ use island_core::config;
 const HELP: &str = "\
 gabes-island-native — now-playing island for Windows and macOS
 
+STATUS: experimental preview. Not tested on real Windows/macOS hardware and
+        not recommended for daily use. The Linux/X11 build is the supported app.
+
 USAGE:
     gabes-island-native [OPTIONS]
 
@@ -199,6 +202,10 @@ fn main() -> ExitCode {
         };
     }
 
+    eprintln!(
+        "gabes-island-native: EXPERIMENTAL — not tested on Windows/macOS hardware, \
+         not recommended for daily use (the Linux/X11 build is the supported app)"
+    );
     match platform::run(platform::Options {
         mock,
         start_edit,

@@ -23,20 +23,30 @@ a terminal-quality static-render cache.
 - Static render cache: only spectrum/time/progress regions are redrawn
 - Everything persisted in `~/.config/gabes/island.conf`
 
+> [!WARNING]
+> **The Windows and macOS port is experimental: not tested, not recommended.**
+> It compiles on both targets and the shared logic has a real test suite, but
+> it has never been run on Windows or macOS hardware. Expect bugs, missing
+> polish and platform behaviour that differs from the Linux app. Do not use it
+> for daily listening yet; use the Linux/X11 build.
+
 ## Platforms
 
 - **Linux / X11**: the root crate (`gabes-island`), built on X11, XShape,
   MPRIS/D-Bus and `/proc`. Tested on Linux Mint 22.3 with Cinnamon/Muffin.
-- **Windows 10/11**: the native port in `native/` (`gabes-island-native`) —
-  layered always-on-top windows, SMTC now-playing and transport, WASAPI
-  loopback spectrum, same pill, lyrics and waterfall.
-- **macOS 13+**: the same native crate — floating `NSWindow`, MediaRemote (with
-  an AppleScript fallback for Spotify/Music). The spectrum is a documented
-  stub on macOS until a Core Audio tap lands.
+  This is the supported build.
+- **Windows 10/11**: experimental preview in `native/`
+  (`gabes-island-native`) — **not tested, not recommended**. Layered
+  always-on-top windows, SMTC now-playing and transport, WASAPI loopback
+  spectrum; compile-checked and built in CI, never run on real hardware.
+- **macOS 13+**: experimental preview in the same crate — **not tested, not
+  recommended**. Floating `NSWindow`, MediaRemote (with an AppleScript
+  fallback for Spotify/Music); the spectrum is a documented stub.
 
-Release binaries for all three platforms are attached to GitHub Releases.
-See [docs/native-port.md](docs/native-port.md) for the architecture, the exact
-parity matrix and the remaining stubs.
+Linux binaries are attached to GitHub Releases. Native artifacts are
+published with an `experimental-untested` suffix so they are not mistaken for
+supported builds. See [docs/native-port.md](docs/native-port.md) for the
+architecture, the exact parity matrix and the remaining stubs.
 
 ## Build (Linux/X11)
 
@@ -47,7 +57,10 @@ cargo build --release
 System packages: `libcairo2-dev`, `libx11-dev`, `libxext-dev`,
 `libfreetype-dev`, `libfontconfig-dev`.
 
-## Build (Windows / macOS)
+## Build (Windows / macOS) — experimental, not tested, not recommended
+
+> These steps build the native port. It has not been verified on real
+> Windows or macOS machines; treat any result as a preview.
 
 The repository is a Cargo workspace: the root package is still the Linux app,
 so `cargo build --release` at the top level builds exactly what it always did.
