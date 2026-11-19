@@ -1,0 +1,72 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shared-logic:
+    name: shared logic (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test island-core
+        run: cargo test -p island-core
+
+  linux-x11:
+    name: Linux X11 app
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev libx11-dev libxext-dev \
+            libfreetype-dev libfontconfig1-dev
+      - name: Build
+        run: cargo build --release
+      - name: Check the binary exists
+        run: test -x target/release/gabes-island
+
+  native:
+    name: native (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests
+        run: cargo test -p gabes-island-native
+      - name: Build
+        run: cargo build --release -p gabes-island-native
+      - name: Headless render smoke test
+        shell: bash
+        run: |
+          cargo run --release -p gabes-island-native -- --preview preview
+          test -s preview/pill.png
+          test -s preview/waterfall.png
+          test -s preview/desktop.png
+      - name: Headless benchmark
+        shell: bash
+        run: cargo run --release -p gabes-island-native -- --bench 2
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: island-native-${{ matrix.os }}
+          path: |
+            target/release/gabes-island-native
+            target/release/gabes-island-native.exe
+            preview/*.png
+          if-no-files-found: warn

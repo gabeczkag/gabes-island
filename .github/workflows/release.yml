@@ -34,3 +34,61 @@ jobs:
           files: |
             gabes-island-*-linux-x86_64.tar.gz
             gabes-island-*-linux-x86_64.tar.gz.sha256
+
+  # The native port is a separate crate; it ships its own binaries next to the
+  # Linux one. Packages are unsigned for now (see README, "Platform support").
+  native-windows:
+    name: Windows x86_64 (native)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release -p gabes-island-native
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/gabes-island-native.exe dist/
+          Copy-Item README.md, LICENSE dist/
+          Compress-Archive -Path dist/* `
+            -DestinationPath "gabes-island-native-$env:GITHUB_REF_NAME-windows-x86_64.zip"
+          Get-FileHash "gabes-island-native-$env:GITHUB_REF_NAME-windows-x86_64.zip" `
+            -Algorithm SHA256 | ForEach-Object {
+              "$($_.Hash.ToLower())  gabes-island-native-$env:GITHUB_REF_NAME-windows-x86_64.zip"
+            } | Set-Content "gabes-island-native-$env:GITHUB_REF_NAME-windows-x86_64.zip.sha256"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            gabes-island-native-*-windows-x86_64.zip
+            gabes-island-native-*-windows-x86_64.zip.sha256
+
+  native-macos:
+    name: macOS (native, universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Build both architectures
+        run: |
+          cargo build --release -p gabes-island-native --target aarch64-apple-darwin
+          cargo build --release -p gabes-island-native --target x86_64-apple-darwin
+          lipo -create \
+            target/aarch64-apple-darwin/release/gabes-island-native \
+            target/x86_64-apple-darwin/release/gabes-island-native \
+            -output /tmp/gabes-island-native
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp /tmp/gabes-island-native dist/
+          cp README.md LICENSE dist/
+          tar -C dist -czf "gabes-island-native-${GITHUB_REF_NAME}-macos-universal.tar.gz" .
+          shasum -a 256 "gabes-island-native-${GITHUB_REF_NAME}-macos-universal.tar.gz" \
+            > "gabes-island-native-${GITHUB_REF_NAME}-macos-universal.tar.gz.sha256"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            gabes-island-native-*-macos-universal.tar.gz
+            gabes-island-native-*-macos-universal.tar.gz.sha256

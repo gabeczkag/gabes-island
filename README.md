@@ -25,16 +25,20 @@ a terminal-quality static-render cache.
 
 ## Platforms
 
-- **Linux / X11**: supported (Cinnamon, MATE, Xfce, i3, …). Tested on Linux
-  Mint 22.3 with Cinnamon/Muffin.
-- **Windows**: not supported. The overlay is built on X11, XShape, MPRIS/D-Bus
-  and `/proc`; a Windows build would need a winit/SMTC backend.
-- **macOS**: not supported for the same reason (no MPRIS, no `/proc`, no
-  X11 by default). A native port would need a different overlay backend.
+- **Linux / X11**: the root crate (`gabes-island`), built on X11, XShape,
+  MPRIS/D-Bus and `/proc`. Tested on Linux Mint 22.3 with Cinnamon/Muffin.
+- **Windows 10/11**: the native port in `native/` (`gabes-island-native`) —
+  layered always-on-top windows, SMTC now-playing and transport, WASAPI
+  loopback spectrum, same pill, lyrics and waterfall.
+- **macOS 13+**: the same native crate — floating `NSWindow`, MediaRemote (with
+  an AppleScript fallback for Spotify/Music). The spectrum is a documented
+  stub on macOS until a Core Audio tap lands.
 
-Linux release binaries are attached to GitHub Releases.
+Release binaries for all three platforms are attached to GitHub Releases.
+See [docs/native-port.md](docs/native-port.md) for the architecture, the exact
+parity matrix and the remaining stubs.
 
-## Build
+## Build (Linux/X11)
 
 ```sh
 cargo build --release
@@ -42,6 +46,37 @@ cargo build --release
 
 System packages: `libcairo2-dev`, `libx11-dev`, `libxext-dev`,
 `libfreetype-dev`, `libfontconfig-dev`.
+
+## Build (Windows / macOS)
+
+The repository is a Cargo workspace: the root package is still the Linux app,
+so `cargo build --release` at the top level builds exactly what it always did.
+The port is a separate crate:
+
+```sh
+cargo build --release -p gabes-island-native
+```
+
+No system libraries are needed — the renderer is `tiny-skia` + `cosmic-text`
+and the Windows/macOS system APIs come through the `windows` and `objc2`
+crates. The only runtime expectation is a `curl` binary for lyrics and remote
+cover art (shipped with Windows 10 1803+ and with macOS).
+
+Run it:
+
+```sh
+./target/release/gabes-island-native            # real system media
+./target/release/gabes-island-native --mock     # fake Spotify session
+./target/release/gabes-island-native --edit     # start in edit mode
+./target/release/gabes-island-native --preview ./out    # PNGs, no window
+./target/release/gabes-island-native --bench 3          # headless benchmark
+./target/release/gabes-island-native --diagnose         # fonts + backends
+```
+
+The native binary is unsigned: on macOS, Gatekeeper may require
+`xattr -d com.apple.quarantine` or a right-click → Open on first launch; on
+Windows, SmartScreen shows "More info → Run anyway". Signing/notarisation is
+a TODO, not a code problem.
 
 ## Run
 
@@ -93,6 +128,30 @@ widget_max_drift_ms=120
 Words for `widget_source=words` live in `~/.config/gabes/words.txt`
 (one per line). With `widget_source=lyrics`, lyrics are cached from LRCLIB
 using the Spotify/MPRIS metadata; plain lyrics fall back to sequential words.
+
+### Native port config
+
+The native build reads the same keys from a platform path:
+
+| Platform | Config |
+| --- | --- |
+| Linux | `~/.config/gabes/island.conf` (root crate) |
+| Windows | `%APPDATA%\gabes\island.conf` |
+| macOS | `~/Library/Application Support/gabes/island.conf` |
+
+`GABES_CONFIG_DIR` overrides the directory on every platform.
+
+One extra key exists for the native build:
+
+```ini
+capture_apps=spotify
+```
+
+A comma-separated, case-insensitive allowlist of players matched against the
+stable app id (`com.spotify.client`, `Spotify.exe!Spotify`, …) and the display
+name. The default is **Spotify only**. Use `capture_apps=spotify,com.apple.Music`
+for more players, or `capture_apps=` (empty) to capture whatever plays.
+`asr_*` keys are accepted but unused on Windows/macOS (ASR is Linux-only).
 
 ## Edit mode
 
@@ -172,6 +231,25 @@ titles and lyric words no longer render as tofu boxes.
 The bar keeps a cached static layer (pill, art, text, buttons) and per
 frame only redraws three small regions: spectrum, time and progress.
 The waterfall renders into a 560×760 column instead of a fullscreen overlay.
+
+### Native port (Linux measurement, same machine)
+
+The native crate is measured with its Linux/X11 development presenter, which
+runs the identical state machine and renderer:
+
+| State | App CPU | App RSS |
+| --- | --- | --- |
+| release build, window shown, mock player, waterfall off | 1.0% | 10.5 MB |
+| headless `--bench 3`, pill only (render cost) | 0.27% of one core | — |
+| headless `--bench 3`, pill + falling lyrics (render cost) | 0.51% of one core | 7.1 MB |
+
+`--bench` reports work per simulated second at the app's own wake cadence
+(50 ms while playing), so "0.27% of one core" is the renderer's share; the
+windowed number also includes the event loop and the compositor. Release
+binary: 4.0 MB. The same trick as on Linux keeps it cheap: the pill's static
+layer is cached and only spectrum, time and progress are repainted, the
+waterfall is its own small window, and an idle overlay wakes four times per
+second instead of sixty.
 
 ## License
 

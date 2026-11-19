@@ -1,0 +1,9 @@
+[package]
+name = "island-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Platform-independent logic shared by the gabes-island ports: config, lyrics, timing, geometry, fall physics."
+repository = "https://github.com/gabeczkag/gabes-island"
+
+[dependencies]
